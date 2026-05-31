@@ -1,0 +1,18 @@
+{
+  "name": "chatgpt-image-archive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local PWA archive for ChatGPT generated images grouped by prompt.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "build": "node scripts/check-app.mjs"
+  },
+  "keywords": [
+    "pwa",
+    "indexeddb",
+    "image-archive",
+    "local-first"
+  ],
+  "license": "UNLICENSED"
+}

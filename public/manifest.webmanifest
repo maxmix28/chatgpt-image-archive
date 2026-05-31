@@ -1,0 +1,17 @@
+{
+  "name": "ChatGPT Image Archive",
+  "short_name": "Image Archive",
+  "display": "standalone",
+  "start_url": "../index.html",
+  "scope": "../",
+  "theme_color": "#111827",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
