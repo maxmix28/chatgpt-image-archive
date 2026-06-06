@@ -1,4 +1,4 @@
-const APP_VERSION = "0.3.1";
+const APP_VERSION = "0.3.2";
 const DB_NAME = "chatgptImageArchiveDb";
 const DB_VERSION = 1;
 const DEFAULT_SUPABASE_URL = "https://qkuzbwnchfxauvjktfzm.supabase.co";
@@ -553,26 +553,38 @@ async function syncFromCloud(options = {}) {
     const cloudGroups = groupsResult.data.map((row) => rowToGroup(row));
     const cloudImages = [];
     const cloudRefs = [];
-    for (const row of generatedResult.data) {
-      const blob = await downloadImageBlob(supabase, row.storage_path);
-      cloudImages.push(rowToGenerated(row, blob));
-    }
-    for (const row of refsResult.data) {
-      const blob = await downloadImageBlob(supabase, row.storage_path);
-      cloudRefs.push(rowToReference(row, blob));
-    }
     if (options.replace) {
       await clearStore("generatedImages");
       await clearStore("referenceImages");
       await clearStore("promptGroups");
     }
     await Promise.all(cloudGroups.map((group) => put("promptGroups", group)));
-    await Promise.all(cloudImages.map((image) => put("generatedImages", image)));
-    await Promise.all(cloudRefs.map((ref) => put("referenceImages", ref)));
+    const imageErrors = [];
+    for (const row of generatedResult.data) {
+      try {
+        const blob = await downloadImageBlob(supabase, row.storage_path);
+        const image = rowToGenerated(row, blob);
+        cloudImages.push(image);
+        await put("generatedImages", image);
+      } catch (error) {
+        imageErrors.push(`生成画像 ${row.id}: ${error.message || "取得失敗"}`);
+      }
+    }
+    for (const row of refsResult.data) {
+      try {
+        const blob = await downloadImageBlob(supabase, row.storage_path);
+        const ref = rowToReference(row, blob);
+        cloudRefs.push(ref);
+        await put("referenceImages", ref);
+      } catch (error) {
+        imageErrors.push(`参考画像 ${row.id}: ${error.message || "取得失敗"}`);
+      }
+    }
     await updateSettings({ lastSyncAt: now() });
     const [localGroups, localImages, localRefs] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages")]);
     state.syncStatus = `取得済み: クラウド グループ${groupsResult.data.length}件 / 端末 グループ${localGroups.length}件`;
     state.syncDetail = `取得元ユーザーID: ${user.id} / 生成画像 ${generatedResult.data.length}→${localImages.length}枚 / 参考画像 ${refsResult.data.length}→${localRefs.length}枚`;
+    state.syncError = imageErrors.length ? `一部の画像を取得できませんでした: ${imageErrors.slice(0, 3).join(" / ")}` : "";
     return true;
   } catch (error) {
     state.syncStatus = "取得失敗";
