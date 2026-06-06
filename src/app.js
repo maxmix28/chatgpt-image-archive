@@ -456,7 +456,8 @@ function rowToReference(row, blob) {
 
 async function uploadImageBlob(supabase, path, blob) {
   const webpBlob = await asWebpBlob(blob);
-  const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, webpBlob, {
+  const webpFile = new File([webpBlob], path.split("/").pop() || "image.webp", { type: "image/webp" });
+  const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, webpFile, {
     cacheControl: "3600",
     contentType: "image/webp",
     upsert: true
