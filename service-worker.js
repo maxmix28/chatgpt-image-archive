@@ -1,4 +1,4 @@
-const CACHE_NAME = "chatgpt-image-archive-v3";
+const CACHE_NAME = "chatgpt-image-archive-v4";
 const ASSETS = [
   "./",
   "./index.html",

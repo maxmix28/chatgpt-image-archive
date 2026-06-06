@@ -1,4 +1,4 @@
-const APP_VERSION = "0.3.0";
+const APP_VERSION = "0.3.1";
 const DB_NAME = "chatgptImageArchiveDb";
 const DB_VERSION = 1;
 const DEFAULT_SUPABASE_URL = "https://qkuzbwnchfxauvjktfzm.supabase.co";
@@ -561,17 +561,17 @@ async function syncFromCloud(options = {}) {
       cloudRefs.push(rowToReference(row, blob));
     }
     if (options.replace) {
-      const transaction = tx(["promptGroups", "generatedImages", "referenceImages"], "readwrite");
-      await clearStore("generatedImages", transaction);
-      await clearStore("referenceImages", transaction);
-      await clearStore("promptGroups", transaction);
+      await clearStore("generatedImages");
+      await clearStore("referenceImages");
+      await clearStore("promptGroups");
     }
     await Promise.all(cloudGroups.map((group) => put("promptGroups", group)));
     await Promise.all(cloudImages.map((image) => put("generatedImages", image)));
     await Promise.all(cloudRefs.map((ref) => put("referenceImages", ref)));
     await updateSettings({ lastSyncAt: now() });
-    state.syncStatus = `取得済み: グループ${groupsResult.data.length}件 / 生成画像${generatedResult.data.length}枚 / 参考画像${refsResult.data.length}枚`;
-    state.syncDetail = `取得元ユーザーID: ${user.id}`;
+    const [localGroups, localImages, localRefs] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages")]);
+    state.syncStatus = `取得済み: クラウド グループ${groupsResult.data.length}件 / 端末 グループ${localGroups.length}件`;
+    state.syncDetail = `取得元ユーザーID: ${user.id} / 生成画像 ${generatedResult.data.length}→${localImages.length}枚 / 参考画像 ${refsResult.data.length}→${localRefs.length}枚`;
     return true;
   } catch (error) {
     state.syncStatus = "取得失敗";
