@@ -36,6 +36,7 @@ const state = {
   syncStatus: "",
   syncError: "",
   syncDetail: "",
+  syncDebug: "",
   objectUrls: []
 };
 
@@ -580,6 +581,38 @@ async function syncFromCloud(options = {}) {
     return false;
   } finally {
     state.syncing = false;
+  }
+}
+
+async function runCloudDiagnostics() {
+  state.syncError = "";
+  state.syncDebug = "";
+  try {
+    const settings = await defaultSettings();
+    const { supabase, user } = await getSupabaseUser();
+    const { data, error } = await supabase
+      .from("prompt_groups")
+      .select("id,title,updated_at,registered_at")
+      .is("deleted_at", null)
+      .order("updated_at", { ascending: false });
+    if (error) throw error;
+    const lines = (data || []).map((row, index) =>
+      `${index + 1}. ${row.updated_at || row.registered_at || "-"} / ${row.id} / ${row.title || "無題"}`
+    );
+    state.syncDebug = [
+      `Project URL: ${settings.supabaseUrl}`,
+      `Email: ${user.email || "-"}`,
+      `User ID: ${user.id}`,
+      `Cloud groups: ${data?.length || 0}`,
+      ...lines
+    ].join("\n");
+    state.syncStatus = `診断完了: クラウド グループ${data?.length || 0}件`;
+    return true;
+  } catch (error) {
+    state.syncStatus = "診断失敗";
+    state.syncError = error.message || "同期診断に失敗しました。";
+    toast(state.syncError);
+    return false;
   }
 }
 
@@ -1341,6 +1374,7 @@ async function renderSettings() {
         <p>状態: ${sessionEmail ? `ログイン中 (${escapeHtml(sessionEmail)})` : "未ログイン"}${state.syncStatus ? ` / ${escapeHtml(state.syncStatus)}` : ""}</p>
         ${state.syncDetail ? `<p class="meta">${escapeHtml(state.syncDetail)}</p>` : ""}
         ${state.syncError ? `<div class="prompt-box"><strong>同期エラー:</strong> ${escapeHtml(state.syncError)}</div>` : ""}
+        ${state.syncDebug ? `<div class="prompt-box">${escapeHtml(state.syncDebug)}</div>` : ""}
         <p>最終同期: ${settings.lastSyncAt ? fmtDate(settings.lastSyncAt) : "未同期"}</p>
         <div class="field"><label for="supabaseUrl">Project URL</label><input id="supabaseUrl" value="${escapeHtml(settings.supabaseUrl || "")}"></div>
         <div class="field"><label for="supabaseKey">Publishable key</label><input id="supabaseKey" value="${escapeHtml(settings.supabaseKey || "")}"></div>
@@ -1355,6 +1389,7 @@ async function renderSettings() {
         <div class="row-actions">
           <button id="syncPull">クラウドの内容で更新</button>
           <button id="syncPush">この端末の内容をアップロード</button>
+          <button id="syncDiag">同期診断</button>
         </div>
       </section>
       <section class="panel pad stack">
@@ -1414,6 +1449,10 @@ async function renderSettings() {
   $("#syncPush").addEventListener("click", async () => {
     const ok = await syncToCloud();
     if (ok) toast("この端末の内容をアップロードしました。");
+    render();
+  });
+  $("#syncDiag").addEventListener("click", async () => {
+    await runCloudDiagnostics();
     render();
   });
   $("#exportZip").addEventListener("click", exportZip);
