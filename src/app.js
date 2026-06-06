@@ -541,7 +541,7 @@ async function syncFromCloud(options = {}) {
   state.syncError = "";
   state.syncDetail = "";
   try {
-    const { supabase } = await getSupabaseUser();
+    const { supabase, user } = await getSupabaseUser();
     const [groupsResult, generatedResult, refsResult] = await Promise.all([
       supabase.from("prompt_groups").select("*").is("deleted_at", null),
       supabase.from("generated_images").select("*").is("deleted_at", null),
@@ -561,6 +561,7 @@ async function syncFromCloud(options = {}) {
     }
     await updateSettings({ lastSyncAt: now() });
     state.syncStatus = `取得済み: グループ${groupsResult.data.length}件 / 生成画像${generatedResult.data.length}枚 / 参考画像${refsResult.data.length}枚`;
+    state.syncDetail = `取得元ユーザーID: ${user.id}`;
     return true;
   } catch (error) {
     state.syncStatus = "取得失敗";
