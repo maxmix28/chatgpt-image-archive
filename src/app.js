@@ -35,6 +35,7 @@ const state = {
   syncing: false,
   syncStatus: "",
   syncError: "",
+  syncDetail: "",
   objectUrls: []
 };
 
@@ -481,7 +482,7 @@ async function cloudSignIn(email, password) {
   const supabase = await getSupabaseClient();
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) throw error;
-  await syncFromCloud();
+  await syncFromCloud({ force: true });
   scheduleCloudSync(300);
 }
 
@@ -497,6 +498,7 @@ async function syncToCloud() {
   state.syncing = true;
   state.syncStatus = "同期中";
   state.syncError = "";
+  state.syncDetail = "";
   try {
     const { supabase, user } = await getSupabaseUser();
     const [groups, generatedImages, referenceImages] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages")]);
@@ -515,7 +517,8 @@ async function syncToCloud() {
       if (error) throw error;
     }
     await updateSettings({ lastSyncAt: now() });
-    state.syncStatus = "同期済み";
+    state.syncStatus = `同期済み: グループ${groups.length}件 / 生成画像${generatedImages.length}枚 / 参考画像${referenceImages.length}枚`;
+    state.syncDetail = `アップロード先ユーザーID: ${user.id}`;
     return true;
   } catch (error) {
     state.syncStatus = "同期失敗";
@@ -527,11 +530,16 @@ async function syncToCloud() {
   }
 }
 
-async function syncFromCloud() {
-  if (state.syncing) return false;
+async function syncFromCloud(options = {}) {
+  if (state.syncing && !options.force) return false;
+  if (options.force) {
+    clearTimeout(state.syncTimer);
+    state.syncing = false;
+  }
   state.syncing = true;
   state.syncStatus = "取得中";
   state.syncError = "";
+  state.syncDetail = "";
   try {
     const { supabase } = await getSupabaseUser();
     const [groupsResult, generatedResult, refsResult] = await Promise.all([
@@ -552,7 +560,7 @@ async function syncFromCloud() {
       await put("referenceImages", rowToReference(row, blob));
     }
     await updateSettings({ lastSyncAt: now() });
-    state.syncStatus = "取得済み";
+    state.syncStatus = `取得済み: グループ${groupsResult.data.length}件 / 生成画像${generatedResult.data.length}枚 / 参考画像${refsResult.data.length}枚`;
     return true;
   } catch (error) {
     state.syncStatus = "取得失敗";
@@ -1320,6 +1328,7 @@ async function renderSettings() {
         <h3>Supabase同期</h3>
         <p>ログインすると、PCとスマホでプロンプト、タグ、メモ、ステータス、1024px WebP画像を共有できます。</p>
         <p>状態: ${sessionEmail ? `ログイン中 (${escapeHtml(sessionEmail)})` : "未ログイン"}${state.syncStatus ? ` / ${escapeHtml(state.syncStatus)}` : ""}</p>
+        ${state.syncDetail ? `<p class="meta">${escapeHtml(state.syncDetail)}</p>` : ""}
         ${state.syncError ? `<div class="prompt-box"><strong>同期エラー:</strong> ${escapeHtml(state.syncError)}</div>` : ""}
         <p>最終同期: ${settings.lastSyncAt ? fmtDate(settings.lastSyncAt) : "未同期"}</p>
         <div class="field"><label for="supabaseUrl">Project URL</label><input id="supabaseUrl" value="${escapeHtml(settings.supabaseUrl || "")}"></div>
@@ -1387,7 +1396,7 @@ async function renderSettings() {
     }
   });
   $("#syncPull").addEventListener("click", async () => {
-    const ok = await syncFromCloud();
+    const ok = await syncFromCloud({ force: true });
     if (ok) toast("クラウドから取得しました。");
     render();
   });
