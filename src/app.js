@@ -34,6 +34,7 @@ const state = {
   syncTimer: null,
   syncing: false,
   syncStatus: "",
+  syncError: "",
   objectUrls: []
 };
 
@@ -483,9 +484,10 @@ async function cloudSignOut() {
 }
 
 async function syncToCloud() {
-  if (state.syncing) return;
+  if (state.syncing) return false;
   state.syncing = true;
   state.syncStatus = "同期中";
+  state.syncError = "";
   try {
     const { supabase, user } = await getSupabaseUser();
     const [groups, generatedImages, referenceImages] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages")]);
@@ -505,18 +507,22 @@ async function syncToCloud() {
     }
     await updateSettings({ lastSyncAt: now() });
     state.syncStatus = "同期済み";
+    return true;
   } catch (error) {
     state.syncStatus = "同期失敗";
-    toast(error.message || "Supabase同期に失敗しました。");
+    state.syncError = error.message || "Supabase同期に失敗しました。";
+    toast(state.syncError);
+    return false;
   } finally {
     state.syncing = false;
   }
 }
 
 async function syncFromCloud() {
-  if (state.syncing) return;
+  if (state.syncing) return false;
   state.syncing = true;
   state.syncStatus = "取得中";
+  state.syncError = "";
   try {
     const { supabase } = await getSupabaseUser();
     const [groupsResult, generatedResult, refsResult] = await Promise.all([
@@ -538,9 +544,12 @@ async function syncFromCloud() {
     }
     await updateSettings({ lastSyncAt: now() });
     state.syncStatus = "取得済み";
+    return true;
   } catch (error) {
     state.syncStatus = "取得失敗";
-    toast(error.message || "Supabaseからの取得に失敗しました。");
+    state.syncError = error.message || "Supabaseからの取得に失敗しました。";
+    toast(state.syncError);
+    return false;
   } finally {
     state.syncing = false;
   }
@@ -1302,6 +1311,7 @@ async function renderSettings() {
         <h3>Supabase同期</h3>
         <p>ログインすると、PCとスマホでプロンプト、タグ、メモ、ステータス、1024px WebP画像を共有できます。</p>
         <p>状態: ${sessionEmail ? `ログイン中 (${escapeHtml(sessionEmail)})` : "未ログイン"}${state.syncStatus ? ` / ${escapeHtml(state.syncStatus)}` : ""}</p>
+        ${state.syncError ? `<div class="prompt-box"><strong>同期エラー:</strong> ${escapeHtml(state.syncError)}</div>` : ""}
         <p>最終同期: ${settings.lastSyncAt ? fmtDate(settings.lastSyncAt) : "未同期"}</p>
         <div class="field"><label for="supabaseUrl">Project URL</label><input id="supabaseUrl" value="${escapeHtml(settings.supabaseUrl || "")}"></div>
         <div class="field"><label for="supabaseKey">Publishable key</label><input id="supabaseKey" value="${escapeHtml(settings.supabaseKey || "")}"></div>
@@ -1368,13 +1378,13 @@ async function renderSettings() {
     }
   });
   $("#syncPull").addEventListener("click", async () => {
-    await syncFromCloud();
-    toast("クラウドから取得しました。");
+    const ok = await syncFromCloud();
+    if (ok) toast("クラウドから取得しました。");
     render();
   });
   $("#syncPush").addEventListener("click", async () => {
-    await syncToCloud();
-    toast("この端末の内容をアップロードしました。");
+    const ok = await syncToCloud();
+    if (ok) toast("この端末の内容をアップロードしました。");
     render();
   });
   $("#exportZip").addEventListener("click", exportZip);
