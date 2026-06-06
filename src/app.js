@@ -482,8 +482,7 @@ async function cloudSignIn(email, password) {
   const supabase = await getSupabaseClient();
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) throw error;
-  await syncFromCloud({ force: true });
-  scheduleCloudSync(300);
+  await syncFromCloud({ force: true, replace: true });
 }
 
 async function cloudSignOut() {
@@ -550,15 +549,26 @@ async function syncFromCloud(options = {}) {
     if (groupsResult.error) throw groupsResult.error;
     if (generatedResult.error) throw generatedResult.error;
     if (refsResult.error) throw refsResult.error;
-    await Promise.all(groupsResult.data.map((row) => put("promptGroups", rowToGroup(row))));
+    const cloudGroups = groupsResult.data.map((row) => rowToGroup(row));
+    const cloudImages = [];
+    const cloudRefs = [];
     for (const row of generatedResult.data) {
       const blob = await downloadImageBlob(supabase, row.storage_path);
-      await put("generatedImages", rowToGenerated(row, blob));
+      cloudImages.push(rowToGenerated(row, blob));
     }
     for (const row of refsResult.data) {
       const blob = await downloadImageBlob(supabase, row.storage_path);
-      await put("referenceImages", rowToReference(row, blob));
+      cloudRefs.push(rowToReference(row, blob));
     }
+    if (options.replace) {
+      const transaction = tx(["promptGroups", "generatedImages", "referenceImages"], "readwrite");
+      await clearStore("generatedImages", transaction);
+      await clearStore("referenceImages", transaction);
+      await clearStore("promptGroups", transaction);
+    }
+    await Promise.all(cloudGroups.map((group) => put("promptGroups", group)));
+    await Promise.all(cloudImages.map((image) => put("generatedImages", image)));
+    await Promise.all(cloudRefs.map((ref) => put("referenceImages", ref)));
     await updateSettings({ lastSyncAt: now() });
     state.syncStatus = `取得済み: グループ${groupsResult.data.length}件 / 生成画像${generatedResult.data.length}枚 / 参考画像${refsResult.data.length}枚`;
     state.syncDetail = `取得元ユーザーID: ${user.id}`;
@@ -1343,7 +1353,7 @@ async function renderSettings() {
           <button id="syncSignOut">ログアウト</button>
         </div>
         <div class="row-actions">
-          <button id="syncPull">クラウドから取得</button>
+          <button id="syncPull">クラウドの内容で更新</button>
           <button id="syncPush">この端末の内容をアップロード</button>
         </div>
       </section>
@@ -1397,8 +1407,8 @@ async function renderSettings() {
     }
   });
   $("#syncPull").addEventListener("click", async () => {
-    const ok = await syncFromCloud({ force: true });
-    if (ok) toast("クラウドから取得しました。");
+    const ok = await syncFromCloud({ force: true, replace: true });
+    if (ok) toast("クラウドの内容で更新しました。");
     render();
   });
   $("#syncPush").addEventListener("click", async () => {
@@ -1654,8 +1664,7 @@ async function boot() {
       .then((supabase) => supabase.auth.getSession())
       .then(async ({ data }) => {
         if (!data.session) return;
-        await syncFromCloud();
-        scheduleCloudSync(500);
+        await syncFromCloud({ force: true, replace: true });
         render();
       })
       .catch(() => {});

@@ -138,7 +138,7 @@ Restrict file size: ON / 1 MB
 Restrict MIME types: ON / image/webp
 ```
 
-アプリ側では `設定` → `Supabase同期` でログインします。Project URLとPublishable keyは初期値として設定済みです。
+アプリ側では `設定` → `Supabase同期` でログインします。Project URLとPublishable keyは初期値として設定済みです。`クラウドの内容で更新` は、端末内のグループ・画像データをSupabase上の内容で更新します。
 
 同期対象:
 
