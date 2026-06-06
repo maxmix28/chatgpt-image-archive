@@ -829,7 +829,7 @@ async function renderLayout(body) {
           <div class="brand-mark">IA</div>
           <div>
             <h1>ChatGPT Image Archive</h1>
-            <p>プロンプト単位で保存するローカル画像アーカイブ</p>
+            <p>プロンプト単位で保存するローカル画像アーカイブ / v${APP_VERSION}</p>
           </div>
         </div>
         <nav class="nav">${nav.map(([href, label]) => `<button class="${route.startsWith(href) ? "active" : ""}" data-nav="${href}">${label}</button>`).join("")}</nav>
