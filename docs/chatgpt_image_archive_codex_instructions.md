@@ -1,5 +1,20 @@
 # Codex用 開発指示書：ChatGPT Image Archive
 
+## 0. 追加開発指示（2026-06-06）
+
+PCとスマホで保存内容を特別な手動操作なしに共有するため、Supabase同期を追加する。
+
+- Supabase同期はユーザーが設定画面でログインした場合のみ有効にする
+- ローカル保存のIndexedDBは維持する
+- 保存後、ログイン中かつ自動同期ONならSupabaseへ自動同期する
+- 起動時、ログインセッションが残っていればSupabaseから取得する
+- Supabase Storageへアップロードする画像は最大1024px / WebP / 品質0.8の保存用画像のみ
+- 元画像はIndexedDB、Supabase、ZIPのいずれにも保存しない
+- Supabase bucketは `archive-images`
+- Storage pathは `{user_id}/generated/{imageId}.webp` と `{user_id}/references/{referenceImageId}.webp`
+- RLS policyによりログインユーザー本人の行・ファイルだけアクセス可能にする
+- OpenAI APIや画像生成APIは引き続き使用しない
+
 ## 1. この開発で作るもの
 
 ChatGPTで生成した画像を、生成時に使ったプロンプト・参考画像・タグ・メモ・ステータスと一緒に保存、検索、再利用できる **PWA対応のローカル画像アーカイブアプリ** を作成してください。

@@ -1,6 +1,10 @@
-const APP_VERSION = "0.2.0";
+const APP_VERSION = "0.3.0";
 const DB_NAME = "chatgptImageArchiveDb";
 const DB_VERSION = 1;
+const DEFAULT_SUPABASE_URL = "https://qkuzbwnchfxauvjktfzm.supabase.co";
+const DEFAULT_SUPABASE_KEY = "sb_publishable_NMhWMg9viA3hZ3mE9IDWoA_mJDS0ryd";
+const SUPABASE_BUCKET = "archive-images";
+const SUPABASE_JS_URL = "https://esm.sh/@supabase/supabase-js@2";
 const STATUSES = [
   ["adopted", "採用"],
   ["pending", "保留"],
@@ -25,6 +29,11 @@ const state = {
   toast: "",
   confirm: null,
   settings: null,
+  supabase: null,
+  supabaseConfigKey: "",
+  syncTimer: null,
+  syncing: false,
+  syncStatus: "",
   objectUrls: []
 };
 
@@ -187,8 +196,30 @@ function clearStore(storeName, transaction = null) {
 
 async function defaultSettings() {
   const settings = await get("settings", "settings");
-  if (settings) return settings;
-  const initial = { id: "settings", theme: "light", thumbnailSize: "medium", listMode: "groups", appVersion: APP_VERSION };
+  if (settings) {
+    const upgraded = {
+      supabaseUrl: DEFAULT_SUPABASE_URL,
+      supabaseKey: DEFAULT_SUPABASE_KEY,
+      autoSync: true,
+      lastSyncAt: settings.lastSyncAt || "",
+      ...settings,
+      appVersion: APP_VERSION
+    };
+    if (JSON.stringify(upgraded) !== JSON.stringify(settings)) await put("settings", upgraded);
+    return upgraded;
+  }
+  const initial = {
+    id: "settings",
+    theme: "light",
+    thumbnailSize: "medium",
+    listMode: "groups",
+    lastBackupAt: "",
+    lastSyncAt: "",
+    supabaseUrl: DEFAULT_SUPABASE_URL,
+    supabaseKey: DEFAULT_SUPABASE_KEY,
+    autoSync: true,
+    appVersion: APP_VERSION
+  };
   await put("settings", initial);
   return initial;
 }
@@ -231,6 +262,10 @@ async function updateSettings(patch) {
   state.settings = { ...(await defaultSettings()), ...patch, appVersion: APP_VERSION };
   await put("settings", state.settings);
   document.documentElement.dataset.theme = state.settings.theme;
+  if ("supabaseUrl" in patch || "supabaseKey" in patch) {
+    state.supabase = null;
+    state.supabaseConfigKey = "";
+  }
   render();
 }
 
@@ -253,6 +288,296 @@ function loadImage(blob) {
     };
     image.src = url;
   });
+}
+
+async function getSupabaseClient() {
+  const settings = await defaultSettings();
+  if (!settings.supabaseUrl || !settings.supabaseKey) throw new Error("Supabase URLとPublishable keyを設定してください。");
+  const configKey = `${settings.supabaseUrl}|${settings.supabaseKey}`;
+  if (state.supabase && state.supabaseConfigKey === configKey) return state.supabase;
+  const { createClient } = await import(SUPABASE_JS_URL);
+  state.supabase = createClient(settings.supabaseUrl, settings.supabaseKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true
+    }
+  });
+  state.supabaseConfigKey = configKey;
+  return state.supabase;
+}
+
+async function getSupabaseUser() {
+  const supabase = await getSupabaseClient();
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) throw new Error("Supabaseにログインしてください。");
+  return { supabase, user: data.user };
+}
+
+function storagePath(userId, kind, id) {
+  return `${userId}/${kind}/${id}.webp`;
+}
+
+function groupToRow(group, userId) {
+  return {
+    id: group.id,
+    user_id: userId,
+    title: group.title || "",
+    prompt: group.prompt || "",
+    negative_prompt: group.negativePrompt || "",
+    memo: group.memo || "",
+    category: group.category || "",
+    tags: group.tags || [],
+    favorite: Boolean(group.favorite),
+    created_at: group.createdAt || now(),
+    registered_at: group.registeredAt || now(),
+    updated_at: group.updatedAt || now(),
+    representative_image_id: group.representativeImageId || null,
+    deleted_at: null
+  };
+}
+
+function rowToGroup(row) {
+  return {
+    id: row.id,
+    title: row.title || "",
+    prompt: row.prompt || "",
+    negativePrompt: row.negative_prompt || "",
+    memo: row.memo || "",
+    category: row.category || "",
+    tags: row.tags || [],
+    favorite: Boolean(row.favorite),
+    createdAt: row.created_at,
+    registeredAt: row.registered_at,
+    updatedAt: row.updated_at,
+    representativeImageId: row.representative_image_id || undefined
+  };
+}
+
+function generatedToRow(image, userId) {
+  return {
+    id: image.id,
+    user_id: userId,
+    group_id: image.groupId,
+    title: image.title || "",
+    memo: image.memo || "",
+    tags: image.tags || [],
+    status: image.status || "pending",
+    favorite: Boolean(image.favorite),
+    rating: Number(image.rating || 0),
+    width: Number(image.width || 0),
+    height: Number(image.height || 0),
+    file_type: "image/webp",
+    hash: image.hash || "",
+    storage_path: storagePath(userId, "generated", image.id),
+    storage_mode: "webp-1024-only",
+    original_width: image.originalWidth || null,
+    original_height: image.originalHeight || null,
+    original_file_type: image.originalFileType || "",
+    registered_at: image.registeredAt || now(),
+    updated_at: image.updatedAt || now(),
+    deleted_at: null
+  };
+}
+
+function rowToGenerated(row, blob) {
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    title: row.title || "",
+    memo: row.memo || "",
+    tags: row.tags || [],
+    status: row.status || "pending",
+    favorite: Boolean(row.favorite),
+    rating: Number(row.rating || 0),
+    width: Number(row.width || 0),
+    height: Number(row.height || 0),
+    fileType: "image/webp",
+    hash: row.hash || "",
+    blob,
+    thumbnailBlob: blob,
+    storageMode: "webp-1024-only",
+    originalWidth: row.original_width || undefined,
+    originalHeight: row.original_height || undefined,
+    originalFileType: row.original_file_type || undefined,
+    registeredAt: row.registered_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function referenceToRow(image, userId) {
+  return {
+    id: image.id,
+    user_id: userId,
+    group_id: image.groupId,
+    type: image.type || "other",
+    memo: image.memo || "",
+    width: Number(image.width || 0),
+    height: Number(image.height || 0),
+    file_type: "image/webp",
+    hash: image.hash || "",
+    storage_path: storagePath(userId, "references", image.id),
+    storage_mode: "webp-1024-only",
+    original_width: image.originalWidth || null,
+    original_height: image.originalHeight || null,
+    original_file_type: image.originalFileType || "",
+    registered_at: image.registeredAt || now(),
+    deleted_at: null
+  };
+}
+
+function rowToReference(row, blob) {
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    type: row.type || "other",
+    memo: row.memo || "",
+    width: Number(row.width || 0),
+    height: Number(row.height || 0),
+    fileType: "image/webp",
+    hash: row.hash || "",
+    blob,
+    thumbnailBlob: blob,
+    storageMode: "webp-1024-only",
+    originalWidth: row.original_width || undefined,
+    originalHeight: row.original_height || undefined,
+    originalFileType: row.original_file_type || undefined,
+    registeredAt: row.registered_at
+  };
+}
+
+async function uploadImageBlob(supabase, path, blob) {
+  const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, blob, {
+    cacheControl: "3600",
+    contentType: "image/webp",
+    upsert: true
+  });
+  if (error) throw error;
+}
+
+async function downloadImageBlob(supabase, path) {
+  const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(path);
+  if (error) throw error;
+  return data;
+}
+
+async function cloudSignUp(email, password) {
+  const supabase = await getSupabaseClient();
+  const { error } = await supabase.auth.signUp({ email, password });
+  if (error) throw error;
+}
+
+async function cloudSignIn(email, password) {
+  const supabase = await getSupabaseClient();
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  await syncFromCloud();
+  scheduleCloudSync(300);
+}
+
+async function cloudSignOut() {
+  const supabase = await getSupabaseClient();
+  await supabase.auth.signOut();
+  state.syncStatus = "";
+  render();
+}
+
+async function syncToCloud() {
+  if (state.syncing) return;
+  state.syncing = true;
+  state.syncStatus = "同期中";
+  try {
+    const { supabase, user } = await getSupabaseUser();
+    const [groups, generatedImages, referenceImages] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages")]);
+    await Promise.all(generatedImages.map((image) => uploadImageBlob(supabase, storagePath(user.id, "generated", image.id), image.blob)));
+    await Promise.all(referenceImages.map((image) => uploadImageBlob(supabase, storagePath(user.id, "references", image.id), image.blob)));
+    if (groups.length) {
+      const { error } = await supabase.from("prompt_groups").upsert(groups.map((group) => groupToRow(group, user.id)));
+      if (error) throw error;
+    }
+    if (generatedImages.length) {
+      const { error } = await supabase.from("generated_images").upsert(generatedImages.map((image) => generatedToRow(image, user.id)));
+      if (error) throw error;
+    }
+    if (referenceImages.length) {
+      const { error } = await supabase.from("reference_images").upsert(referenceImages.map((image) => referenceToRow(image, user.id)));
+      if (error) throw error;
+    }
+    await updateSettings({ lastSyncAt: now() });
+    state.syncStatus = "同期済み";
+  } catch (error) {
+    state.syncStatus = "同期失敗";
+    toast(error.message || "Supabase同期に失敗しました。");
+  } finally {
+    state.syncing = false;
+  }
+}
+
+async function syncFromCloud() {
+  if (state.syncing) return;
+  state.syncing = true;
+  state.syncStatus = "取得中";
+  try {
+    const { supabase } = await getSupabaseUser();
+    const [groupsResult, generatedResult, refsResult] = await Promise.all([
+      supabase.from("prompt_groups").select("*").is("deleted_at", null),
+      supabase.from("generated_images").select("*").is("deleted_at", null),
+      supabase.from("reference_images").select("*").is("deleted_at", null)
+    ]);
+    if (groupsResult.error) throw groupsResult.error;
+    if (generatedResult.error) throw generatedResult.error;
+    if (refsResult.error) throw refsResult.error;
+    await Promise.all(groupsResult.data.map((row) => put("promptGroups", rowToGroup(row))));
+    for (const row of generatedResult.data) {
+      const blob = await downloadImageBlob(supabase, row.storage_path);
+      await put("generatedImages", rowToGenerated(row, blob));
+    }
+    for (const row of refsResult.data) {
+      const blob = await downloadImageBlob(supabase, row.storage_path);
+      await put("referenceImages", rowToReference(row, blob));
+    }
+    await updateSettings({ lastSyncAt: now() });
+    state.syncStatus = "取得済み";
+  } catch (error) {
+    state.syncStatus = "取得失敗";
+    toast(error.message || "Supabaseからの取得に失敗しました。");
+  } finally {
+    state.syncing = false;
+  }
+}
+
+function scheduleCloudSync(delay = 1200) {
+  clearTimeout(state.syncTimer);
+  state.syncTimer = setTimeout(async () => {
+    const settings = await defaultSettings();
+    if (!settings.autoSync) return;
+    const supabase = await getSupabaseClient().catch(() => null);
+    if (!supabase) return;
+    const { data } = await supabase.auth.getSession();
+    if (!data.session) return;
+    await syncToCloud();
+  }, delay);
+}
+
+async function deleteRemoteGenerated(image) {
+  const { supabase, user } = await getSupabaseUser();
+  await supabase.from("generated_images").delete().eq("id", image.id);
+  await supabase.storage.from(SUPABASE_BUCKET).remove([storagePath(user.id, "generated", image.id)]);
+}
+
+async function deleteRemoteReference(ref) {
+  const { supabase, user } = await getSupabaseUser();
+  await supabase.from("reference_images").delete().eq("id", ref.id);
+  await supabase.storage.from(SUPABASE_BUCKET).remove([storagePath(user.id, "references", ref.id)]);
+}
+
+async function deleteRemoteGroup(group, images, refs) {
+  const { supabase, user } = await getSupabaseUser();
+  await supabase.storage.from(SUPABASE_BUCKET).remove([
+    ...images.map((image) => storagePath(user.id, "generated", image.id)),
+    ...refs.map((ref) => storagePath(user.id, "references", ref.id))
+  ]);
+  await supabase.from("prompt_groups").delete().eq("id", group.id);
 }
 
 async function makeArchiveImage(file) {
@@ -348,6 +673,7 @@ async function createGroupFromForm(form) {
   await put("promptGroups", group, transaction);
   await Promise.all(generated.map((image) => put("generatedImages", image, transaction)));
   await Promise.all(references.map((image) => put("referenceImages", image, transaction)));
+  scheduleCloudSync();
   toast("グループを登録しました。");
   navigate(`/group/${groupId}`);
 }
@@ -380,6 +706,7 @@ async function addFilesToGroup(groupId, files, kind) {
     representativeImageId: group.representativeImageId || records[0]?.id,
     updatedAt: date
   }, transaction);
+  scheduleCloudSync();
   toast(kind === "generated" ? "生成画像を追加しました。" : "参考画像を追加しました。");
   render();
 }
@@ -546,6 +873,7 @@ async function renderGroupList() {
       event.stopPropagation();
       const group = await get("promptGroups", el.dataset.toggleGroupFav);
       await put("promptGroups", { ...group, favorite: !group.favorite, updatedAt: now() });
+      scheduleCloudSync();
       render();
     }));
   };
@@ -750,10 +1078,12 @@ async function renderGroupDetail(groupId) {
   $("[data-edit-group]").addEventListener("click", () => renderGroupEdit(groupId));
   $("[data-fav-group]").addEventListener("click", async () => {
     await put("promptGroups", { ...group, favorite: !group.favorite, updatedAt: now() });
+    scheduleCloudSync();
     render();
   });
   $("[data-delete-group]").addEventListener("click", async () => {
     if (!await askConfirm("グループ削除", "グループと所属する画像、参考画像を完全に削除します。", "削除")) return;
+    await deleteRemoteGroup(group, images, refs).catch(() => {});
     const transaction = tx(["promptGroups", "generatedImages", "referenceImages"], "readwrite");
     await Promise.all(images.map((image) => del("generatedImages", image.id, transaction)));
     await Promise.all(refs.map((ref) => del("referenceImages", ref.id, transaction)));
@@ -769,7 +1099,10 @@ async function renderGroupDetail(groupId) {
   $$("[data-delete-ref]").forEach((button) => button.addEventListener("click", async (event) => {
     event.stopPropagation();
     if (!await askConfirm("参考画像削除", "この参考画像を削除します。", "削除")) return;
+    const ref = await get("referenceImages", button.dataset.deleteRef);
+    if (ref) await deleteRemoteReference(ref).catch(() => {});
     await del("referenceImages", button.dataset.deleteRef);
+    scheduleCloudSync();
     toast("参考画像を削除しました。");
     render();
   }));
@@ -820,6 +1153,7 @@ async function renderGroupEdit(groupId) {
       favorite: form.favorite.checked,
       updatedAt: now()
     });
+    scheduleCloudSync();
     toast("グループを更新しました。");
     navigate(`/group/${groupId}`);
   });
@@ -870,14 +1204,19 @@ async function renderImageDetail(imageId) {
   $("[data-edit-image]").addEventListener("click", () => renderImageEdit(imageId));
   $("[data-delete-image]").addEventListener("click", async () => {
     if (!await askConfirm("画像削除", "この生成画像を削除します。", "削除")) return;
+    await deleteRemoteGenerated(image).catch(() => {});
     await del("generatedImages", imageId);
+    scheduleCloudSync();
     toast("画像を削除しました。");
     navigate(`/group/${group.id}`);
   });
   $$("[data-delete-ref]").forEach((button) => button.addEventListener("click", async (event) => {
     event.stopPropagation();
     if (!await askConfirm("参考画像削除", "この参考画像を削除します。", "削除")) return;
+    const ref = await get("referenceImages", button.dataset.deleteRef);
+    if (ref) await deleteRemoteReference(ref).catch(() => {});
     await del("referenceImages", button.dataset.deleteRef);
+    scheduleCloudSync();
     toast("参考画像を削除しました。");
     render();
   }));
@@ -913,6 +1252,7 @@ async function renderImageEdit(imageId) {
     });
     const group = await get("promptGroups", image.groupId);
     await put("promptGroups", { ...group, updatedAt: now() });
+    scheduleCloudSync();
     toast("画像情報を更新しました。");
     navigate(`/image/${imageId}`);
   });
@@ -927,6 +1267,14 @@ function extFromMime(mime) {
 
 async function renderSettings() {
   const [groups, images, refs, settings] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages"), defaultSettings()]);
+  let sessionEmail = "";
+  try {
+    const supabase = await getSupabaseClient();
+    const { data } = await supabase.auth.getSession();
+    sessionEmail = data.session?.user?.email || "";
+  } catch {
+    sessionEmail = "";
+  }
   const bytes = [...images, ...refs].reduce((sum, image) => sum + (image.blob?.size || 0), 0);
   await renderLayout(`
     <section class="page-head"><div><h2>設定</h2><p>バックアップと表示設定を管理します。</p></div></section>
@@ -951,9 +1299,29 @@ async function renderSettings() {
         <button id="deleteAll" class="danger">全データ削除</button>
       </section>
       <section class="panel pad stack">
+        <h3>Supabase同期</h3>
+        <p>ログインすると、PCとスマホでプロンプト、タグ、メモ、ステータス、1024px WebP画像を共有できます。</p>
+        <p>状態: ${sessionEmail ? `ログイン中 (${escapeHtml(sessionEmail)})` : "未ログイン"}${state.syncStatus ? ` / ${escapeHtml(state.syncStatus)}` : ""}</p>
+        <p>最終同期: ${settings.lastSyncAt ? fmtDate(settings.lastSyncAt) : "未同期"}</p>
+        <div class="field"><label for="supabaseUrl">Project URL</label><input id="supabaseUrl" value="${escapeHtml(settings.supabaseUrl || "")}"></div>
+        <div class="field"><label for="supabaseKey">Publishable key</label><input id="supabaseKey" value="${escapeHtml(settings.supabaseKey || "")}"></div>
+        <label><input id="autoSync" type="checkbox" ${settings.autoSync ? "checked" : ""}> ログイン中は保存後に自動同期</label>
+        <div class="field"><label for="syncEmail">メールアドレス</label><input id="syncEmail" type="email" autocomplete="email"></div>
+        <div class="field"><label for="syncPassword">パスワード</label><input id="syncPassword" type="password" autocomplete="current-password"></div>
+        <div class="row-actions">
+          <button id="syncSignUp">新規登録</button>
+          <button class="primary" id="syncSignIn">ログイン</button>
+          <button id="syncSignOut">ログアウト</button>
+        </div>
+        <div class="row-actions">
+          <button id="syncPull">クラウドから取得</button>
+          <button id="syncPush">この端末の内容をアップロード</button>
+        </div>
+      </section>
+      <section class="panel pad stack">
         <h3>アプリ情報</h3>
         <p>Version ${APP_VERSION}</p>
-        <p>外部サーバー通信、画像生成API、クラウド同期は使用しません。データはこのブラウザのIndexedDBに保存されます。</p>
+        <p>画像生成APIは使用しません。Supabase同期を有効にした場合のみ、ログイン中のSupabaseプロジェクトへデータを送信します。</p>
       </section>
     </div>
   `);
@@ -961,6 +1329,54 @@ async function renderSettings() {
   $("#thumbnailSize").value = settings.thumbnailSize;
   $("#theme").addEventListener("change", (event) => updateSettings({ theme: event.target.value }));
   $("#thumbnailSize").addEventListener("change", (event) => updateSettings({ thumbnailSize: event.target.value }));
+  $("#supabaseUrl").addEventListener("change", (event) => updateSettings({ supabaseUrl: event.target.value.trim() }));
+  $("#supabaseKey").addEventListener("change", (event) => updateSettings({ supabaseKey: event.target.value.trim() }));
+  $("#autoSync").addEventListener("change", (event) => updateSettings({ autoSync: event.target.checked }));
+  $("#syncSignUp").addEventListener("click", async () => {
+    try {
+      const supabaseUrl = $("#supabaseUrl").value.trim();
+      const supabaseKey = $("#supabaseKey").value.trim();
+      const email = $("#syncEmail").value.trim();
+      const password = $("#syncPassword").value;
+      await updateSettings({ supabaseUrl, supabaseKey });
+      await cloudSignUp(email, password);
+      toast("確認メールが届く場合があります。確認後にログインしてください。");
+    } catch (error) {
+      toast(error.message || "Supabase登録に失敗しました。");
+    }
+  });
+  $("#syncSignIn").addEventListener("click", async () => {
+    try {
+      const supabaseUrl = $("#supabaseUrl").value.trim();
+      const supabaseKey = $("#supabaseKey").value.trim();
+      const email = $("#syncEmail").value.trim();
+      const password = $("#syncPassword").value;
+      await updateSettings({ supabaseUrl, supabaseKey });
+      await cloudSignIn(email, password);
+      toast("Supabaseにログインしました。");
+      render();
+    } catch (error) {
+      toast(error.message || "Supabaseログインに失敗しました。");
+    }
+  });
+  $("#syncSignOut").addEventListener("click", async () => {
+    try {
+      await cloudSignOut();
+      toast("Supabaseからログアウトしました。");
+    } catch (error) {
+      toast(error.message || "ログアウトに失敗しました。");
+    }
+  });
+  $("#syncPull").addEventListener("click", async () => {
+    await syncFromCloud();
+    toast("クラウドから取得しました。");
+    render();
+  });
+  $("#syncPush").addEventListener("click", async () => {
+    await syncToCloud();
+    toast("この端末の内容をアップロードしました。");
+    render();
+  });
   $("#exportZip").addEventListener("click", exportZip);
   $("#importAppend").addEventListener("click", () => importZip(false));
   $("#importReplace").addEventListener("click", async () => {
@@ -1203,6 +1619,17 @@ async function boot() {
   await migrateLegacyStoredImages();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+  }
+  if (state.settings.autoSync) {
+    getSupabaseClient()
+      .then((supabase) => supabase.auth.getSession())
+      .then(async ({ data }) => {
+        if (!data.session) return;
+        await syncFromCloud();
+        scheduleCloudSync(500);
+        render();
+      })
+      .catch(() => {});
   }
   render();
 }
