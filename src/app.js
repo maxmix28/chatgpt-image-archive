@@ -1,4 +1,4 @@
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.2.0";
 const DB_NAME = "chatgptImageArchiveDb";
 const DB_VERSION = 1;
 const STATUSES = [
@@ -193,6 +193,40 @@ async function defaultSettings() {
   return initial;
 }
 
+async function migrateLegacyStoredImages() {
+  const storeNames = ["generatedImages", "referenceImages"];
+  for (const storeName of storeNames) {
+    const records = await all(storeName);
+    const legacy = records.filter((record) => record.storageMode !== "webp-1024-only");
+    if (!legacy.length) continue;
+    const transaction = tx([storeName], "readwrite");
+    for (const record of legacy) {
+      const archiveBlob = record.thumbnailBlob || record.blob;
+      let width = record.width;
+      let height = record.height;
+      try {
+        const image = await loadImage(archiveBlob);
+        width = image.width;
+        height = image.height;
+      } catch {
+        // Keep previous dimensions if the legacy thumbnail cannot be measured.
+      }
+      await put(storeName, {
+        ...record,
+        blob: archiveBlob,
+        thumbnailBlob: archiveBlob,
+        width,
+        height,
+        originalWidth: record.originalWidth || record.width,
+        originalHeight: record.originalHeight || record.height,
+        originalFileType: record.originalFileType || record.fileType,
+        fileType: archiveBlob.type || "image/webp",
+        storageMode: "webp-1024-only"
+      }, transaction);
+    }
+  }
+}
+
 async function updateSettings(patch) {
   state.settings = { ...(await defaultSettings()), ...patch, appVersion: APP_VERSION };
   await put("settings", state.settings);
@@ -221,25 +255,47 @@ function loadImage(blob) {
   });
 }
 
-async function makeThumbnail(file) {
+async function makeArchiveImage(file) {
   const image = await loadImage(file);
-  const scale = Math.min(512 / image.width, 512 / image.height, 1);
+  const scale = Math.min(1024 / image.width, 1024 / image.height, 1);
   const width = Math.max(1, Math.round(image.width * scale));
   const height = Math.max(1, Math.round(image.height * scale));
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   canvas.getContext("2d").drawImage(image, 0, 0, width, height);
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.8));
-  return { thumbnailBlob: blob || file, width: image.width, height: image.height };
+  const archiveBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.8));
+  if (!archiveBlob) throw new Error("WebP画像の作成に失敗しました。");
+  return {
+    archiveBlob,
+    width,
+    height,
+    originalWidth: image.width,
+    originalHeight: image.height,
+    originalFileType: file.type
+  };
 }
 
 async function prepareImage(file, groupId, kind) {
   if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) throw new Error(`${file.name} は対応外の画像形式です。`);
-  const hash = await fileHash(file);
-  const { thumbnailBlob, width, height } = await makeThumbnail(file);
+  const { archiveBlob, width, height, originalWidth, originalHeight, originalFileType } = await makeArchiveImage(file);
+  const hash = await fileHash(archiveBlob);
   const id = uid(kind === "generated" ? "img" : "ref");
-  return { id, groupId, width, height, fileType: file.type, hash, blob: file, thumbnailBlob, registeredAt: now() };
+  return {
+    id,
+    groupId,
+    width,
+    height,
+    originalWidth,
+    originalHeight,
+    originalFileType,
+    fileType: "image/webp",
+    hash,
+    blob: archiveBlob,
+    thumbnailBlob: archiveBlob,
+    storageMode: "webp-1024-only",
+    registeredAt: now()
+  };
 }
 
 async function duplicateWarnings(items) {
@@ -782,7 +838,7 @@ async function renderImageDetail(imageId) {
       <div><h2>${escapeHtml(image.title || "無題の画像")}</h2><p>${escapeHtml(group.title)} / ${image.width} x ${image.height}</p></div>
       <div class="row-actions">
         <button data-copy-prompt>プロンプトをコピー</button>
-        <button data-download>画像保存</button>
+        <button data-download>WebP保存</button>
         <button data-edit-image>編集</button>
         <button class="danger" data-delete-image>削除</button>
       </div>
@@ -792,6 +848,7 @@ async function renderImageDetail(imageId) {
       <section class="panel pad stack">
         <div class="chips"><span class="chip status">${statusLabel(image.status)}</span>${(image.tags || []).map((tag) => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}</div>
         <p><strong>お気に入り:</strong> ${image.favorite ? "はい" : "いいえ"} / <strong>評価:</strong> ${image.rating || 0} / 5</p>
+        <p><strong>保存画像:</strong> 最大1024px / WebP / 品質0.8${image.originalWidth ? `（元画像 ${image.originalWidth} x ${image.originalHeight} は保存していません）` : ""}</p>
         ${image.memo ? `<div class="prompt-box">${escapeHtml(image.memo)}</div>` : ""}
         <h3>所属グループのプロンプト</h3>
         <div class="prompt-box">${escapeHtml(group.prompt)}</div>
@@ -870,7 +927,7 @@ function extFromMime(mime) {
 
 async function renderSettings() {
   const [groups, images, refs, settings] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages"), defaultSettings()]);
-  const bytes = [...images, ...refs].reduce((sum, image) => sum + (image.blob?.size || 0) + (image.thumbnailBlob?.size || 0), 0);
+  const bytes = [...images, ...refs].reduce((sum, image) => sum + (image.blob?.size || 0), 0);
   await renderLayout(`
     <section class="page-head"><div><h2>設定</h2><p>バックアップと表示設定を管理します。</p></div></section>
     <div class="settings-grid">
@@ -883,6 +940,7 @@ async function renderSettings() {
         <h3>データ</h3>
         <p>グループ ${groups.length}件 / 生成画像 ${images.length}枚 / 参考画像 ${refs.length}枚</p>
         <p>概算使用量: ${sizeText(bytes)}</p>
+        <p>保存画像は最大1024pxのWebPのみです。元画像はIndexedDBにもZIPにも保存しません。</p>
         <p>最終バックアップ: ${settings.lastBackupAt ? fmtDate(settings.lastBackupAt) : "未作成"}</p>
         <button class="primary" id="exportZip">ZIPエクスポート</button>
         <div class="field"><label for="importZip">ZIPインポート</label><input id="importZip" type="file" accept=".zip,application/zip"></div>
@@ -1015,23 +1073,23 @@ async function exportZip() {
     const [promptGroups, generatedImages, referenceImages, settings] = await Promise.all([all("promptGroups"), all("generatedImages"), all("referenceImages"), defaultSettings()]);
     const cleanGenerated = generatedImages.map(({ blob, thumbnailBlob, ...meta }) => ({
       ...meta,
-      filePath: `images/generated/${meta.id}.${extFromMime(meta.fileType)}`,
-      thumbnailPath: `thumbnails/generated/${meta.id}.webp`
+      filePath: `images/generated/${meta.id}.webp`,
+      thumbnailPath: `images/generated/${meta.id}.webp`,
+      storageMode: meta.storageMode || "webp-1024-only"
     }));
     const cleanRefs = referenceImages.map(({ blob, thumbnailBlob, ...meta }) => ({
       ...meta,
-      filePath: `images/references/${meta.id}.${extFromMime(meta.fileType)}`,
-      thumbnailPath: `thumbnails/references/${meta.id}.webp`
+      filePath: `images/references/${meta.id}.webp`,
+      thumbnailPath: `images/references/${meta.id}.webp`,
+      storageMode: meta.storageMode || "webp-1024-only"
     }));
     const metadata = { version: 1, exportedAt: now(), appName: "ChatGPT Image Archive", promptGroups, generatedImages: cleanGenerated, referenceImages: cleanRefs, settings };
     const files = [{ name: "metadata.json", blob: new Blob([JSON.stringify(metadata, null, 2)], { type: "application/json" }) }];
     generatedImages.forEach((image) => {
-      files.push({ name: `images/generated/${image.id}.${extFromMime(image.fileType)}`, blob: image.blob });
-      files.push({ name: `thumbnails/generated/${image.id}.webp`, blob: image.thumbnailBlob });
+      files.push({ name: `images/generated/${image.id}.webp`, blob: image.blob });
     });
     referenceImages.forEach((image) => {
-      files.push({ name: `images/references/${image.id}.${extFromMime(image.fileType)}`, blob: image.blob });
-      files.push({ name: `thumbnails/references/${image.id}.webp`, blob: image.thumbnailBlob });
+      files.push({ name: `images/references/${image.id}.webp`, blob: image.blob });
     });
     const zip = await createZip(files);
     const date = new Date();
@@ -1070,12 +1128,32 @@ async function importZip(replace) {
     };
     const groups = metadata.promptGroups.map((group) => ({ ...group, id: mapId(group.id, "grp"), representativeImageId: group.representativeImageId ? mapId(group.representativeImageId, "img") : undefined }));
     const generated = await Promise.all(metadata.generatedImages.map(async (image) => {
-      if (!files.has(image.filePath) || !files.has(image.thumbnailPath)) throw new Error(`ZIP内の画像ファイルが不足しています: ${image.id}`);
-      return { ...image, id: mapId(image.id, "img"), groupId: mapId(image.groupId, "grp"), blob: files.get(image.filePath), thumbnailBlob: files.get(image.thumbnailPath) };
+      const archivePath = image.thumbnailPath || image.filePath;
+      if (!archivePath || !files.has(archivePath)) throw new Error(`ZIP内の画像ファイルが不足しています: ${image.id}`);
+      const archiveBlob = files.get(archivePath);
+      return {
+        ...image,
+        id: mapId(image.id, "img"),
+        groupId: mapId(image.groupId, "grp"),
+        blob: archiveBlob,
+        thumbnailBlob: archiveBlob,
+        fileType: archiveBlob.type || "image/webp",
+        storageMode: "webp-1024-only"
+      };
     }));
     const refs = await Promise.all(metadata.referenceImages.map(async (image) => {
-      if (!files.has(image.filePath) || !files.has(image.thumbnailPath)) throw new Error(`ZIP内の参考画像ファイルが不足しています: ${image.id}`);
-      return { ...image, id: mapId(image.id, "ref"), groupId: mapId(image.groupId, "grp"), blob: files.get(image.filePath), thumbnailBlob: files.get(image.thumbnailPath) };
+      const archivePath = image.thumbnailPath || image.filePath;
+      if (!archivePath || !files.has(archivePath)) throw new Error(`ZIP内の参考画像ファイルが不足しています: ${image.id}`);
+      const archiveBlob = files.get(archivePath);
+      return {
+        ...image,
+        id: mapId(image.id, "ref"),
+        groupId: mapId(image.groupId, "grp"),
+        blob: archiveBlob,
+        thumbnailBlob: archiveBlob,
+        fileType: archiveBlob.type || "image/webp",
+        storageMode: "webp-1024-only"
+      };
     }));
     const existingHashes = new Set([...(await all("generatedImages")), ...(await all("referenceImages"))].map((image) => image.hash));
     const duplicates = [...generated, ...refs].filter((image) => existingHashes.has(image.hash));
@@ -1122,6 +1200,7 @@ window.addEventListener("beforeunload", cleanupUrls);
 async function boot() {
   state.db = await openDb();
   state.settings = await defaultSettings();
+  await migrateLegacyStoredImages();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {});
   }
