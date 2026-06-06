@@ -96,6 +96,11 @@ function blobUrl(blob) {
   return url;
 }
 
+async function asWebpBlob(blob) {
+  if (blob?.type === "image/webp") return blob;
+  return new Blob([await blob.arrayBuffer()], { type: "image/webp" });
+}
+
 function cleanupUrls() {
   state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
   state.objectUrls = [];
@@ -233,7 +238,7 @@ async function migrateLegacyStoredImages() {
     if (!legacy.length) continue;
     const transaction = tx([storeName], "readwrite");
     for (const record of legacy) {
-      const archiveBlob = record.thumbnailBlob || record.blob;
+      const archiveBlob = await asWebpBlob(record.thumbnailBlob || record.blob);
       let width = record.width;
       let height = record.height;
       try {
@@ -382,6 +387,7 @@ function generatedToRow(image, userId) {
 }
 
 function rowToGenerated(row, blob) {
+  const webpBlob = blob.type === "image/webp" ? blob : new Blob([blob], { type: "image/webp" });
   return {
     id: row.id,
     groupId: row.group_id,
@@ -395,8 +401,8 @@ function rowToGenerated(row, blob) {
     height: Number(row.height || 0),
     fileType: "image/webp",
     hash: row.hash || "",
-    blob,
-    thumbnailBlob: blob,
+    blob: webpBlob,
+    thumbnailBlob: webpBlob,
     storageMode: "webp-1024-only",
     originalWidth: row.original_width || undefined,
     originalHeight: row.original_height || undefined,
@@ -428,6 +434,7 @@ function referenceToRow(image, userId) {
 }
 
 function rowToReference(row, blob) {
+  const webpBlob = blob.type === "image/webp" ? blob : new Blob([blob], { type: "image/webp" });
   return {
     id: row.id,
     groupId: row.group_id,
@@ -437,8 +444,8 @@ function rowToReference(row, blob) {
     height: Number(row.height || 0),
     fileType: "image/webp",
     hash: row.hash || "",
-    blob,
-    thumbnailBlob: blob,
+    blob: webpBlob,
+    thumbnailBlob: webpBlob,
     storageMode: "webp-1024-only",
     originalWidth: row.original_width || undefined,
     originalHeight: row.original_height || undefined,
@@ -448,7 +455,8 @@ function rowToReference(row, blob) {
 }
 
 async function uploadImageBlob(supabase, path, blob) {
-  const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, blob, {
+  const webpBlob = await asWebpBlob(blob);
+  const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, webpBlob, {
     cacheControl: "3600",
     contentType: "image/webp",
     upsert: true
