@@ -699,7 +699,7 @@ async function createGroupFromForm(form) {
   await put("promptGroups", group, transaction);
   await Promise.all(generated.map((image) => put("generatedImages", image, transaction)));
   await Promise.all(references.map((image) => put("referenceImages", image, transaction)));
-  scheduleCloudSync();
+  scheduleCloudSync(0);
   toast("グループを登録しました。");
   navigate(`/group/${groupId}`);
 }
@@ -732,7 +732,7 @@ async function addFilesToGroup(groupId, files, kind) {
     representativeImageId: group.representativeImageId || records[0]?.id,
     updatedAt: date
   }, transaction);
-  scheduleCloudSync();
+  scheduleCloudSync(0);
   toast(kind === "generated" ? "生成画像を追加しました。" : "参考画像を追加しました。");
   render();
 }
@@ -899,7 +899,7 @@ async function renderGroupList() {
       event.stopPropagation();
       const group = await get("promptGroups", el.dataset.toggleGroupFav);
       await put("promptGroups", { ...group, favorite: !group.favorite, updatedAt: now() });
-      scheduleCloudSync();
+      scheduleCloudSync(0);
       render();
     }));
   };
@@ -1104,7 +1104,7 @@ async function renderGroupDetail(groupId) {
   $("[data-edit-group]").addEventListener("click", () => renderGroupEdit(groupId));
   $("[data-fav-group]").addEventListener("click", async () => {
     await put("promptGroups", { ...group, favorite: !group.favorite, updatedAt: now() });
-    scheduleCloudSync();
+    scheduleCloudSync(0);
     render();
   });
   $("[data-delete-group]").addEventListener("click", async () => {
@@ -1128,7 +1128,7 @@ async function renderGroupDetail(groupId) {
     const ref = await get("referenceImages", button.dataset.deleteRef);
     if (ref) await deleteRemoteReference(ref).catch(() => {});
     await del("referenceImages", button.dataset.deleteRef);
-    scheduleCloudSync();
+    scheduleCloudSync(0);
     toast("参考画像を削除しました。");
     render();
   }));
@@ -1179,7 +1179,7 @@ async function renderGroupEdit(groupId) {
       favorite: form.favorite.checked,
       updatedAt: now()
     });
-    scheduleCloudSync();
+    scheduleCloudSync(0);
     toast("グループを更新しました。");
     navigate(`/group/${groupId}`);
   });
@@ -1232,7 +1232,7 @@ async function renderImageDetail(imageId) {
     if (!await askConfirm("画像削除", "この生成画像を削除します。", "削除")) return;
     await deleteRemoteGenerated(image).catch(() => {});
     await del("generatedImages", imageId);
-    scheduleCloudSync();
+    scheduleCloudSync(0);
     toast("画像を削除しました。");
     navigate(`/group/${group.id}`);
   });
@@ -1242,7 +1242,7 @@ async function renderImageDetail(imageId) {
     const ref = await get("referenceImages", button.dataset.deleteRef);
     if (ref) await deleteRemoteReference(ref).catch(() => {});
     await del("referenceImages", button.dataset.deleteRef);
-    scheduleCloudSync();
+    scheduleCloudSync(0);
     toast("参考画像を削除しました。");
     render();
   }));
@@ -1278,7 +1278,7 @@ async function renderImageEdit(imageId) {
     });
     const group = await get("promptGroups", image.groupId);
     await put("promptGroups", { ...group, updatedAt: now() });
-    scheduleCloudSync();
+    scheduleCloudSync(0);
     toast("画像情報を更新しました。");
     navigate(`/image/${imageId}`);
   });
